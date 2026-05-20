@@ -40,18 +40,7 @@ html.dark-theme {
   --shadow-1: 0 7px 8px -4px rgba(0,0,0,.6),0 12px 17px 2px rgba(0,0,0,.4),0 5px 22px 4px rgba(0,0,0,.3);
 }
 
-/* Manual light mode override */
-html.light-theme {
-  --bg: #f9fafb;
-  --fg: #1f2937;
-  --accent: #2563eb;
-  --accent-light: #dbeafe;
-  --border: #e5e7eb;
-  --border-strong: #9ca3af;
-  --row-alt: #f3f4f6;
-  --row-hover: #e0e7ff;
-  --shadow-1: 0 7px 8px -4px rgba(0,0,0,.1),0 12px 17px 2px rgba(0,0,0,.06),0 5px 22px 4px rgba(0,0,0,.04);
-}
+
 
 /* ---------- Global ---------- */
 html, body {
@@ -100,7 +89,7 @@ a:focus {
   .card { background: #1f2937; }
 }
 html.dark-theme .card { background: #1f2937; border-color: var(--border); }
-html.light-theme .card { background: white; border-color: var(--border); }
+
 
 /* ---------- Table styles ---------- */
 .table-wrap {
@@ -115,7 +104,7 @@ html.light-theme .card { background: white; border-color: var(--border); }
   .table-wrap { background: #1f2937; }
 }
 html.dark-theme .table-wrap { background: #1f2937; }
-html.light-theme .table-wrap { background: white; }
+
 
 /* Override Bootstrap table styles for better integration */
 .table-wrap .table {
@@ -174,28 +163,13 @@ html.dark-theme .table-wrap .table tbody tr td {
   color: #f3f4f6 !important;
 }
 
-html.light-theme .table-wrap .table {
-  --bs-table-bg: transparent;
-  --bs-table-striped-bg: var(--row-alt);
-  --bs-table-hover-bg: var(--row-hover);
-  --bs-table-border-color: var(--border);
-  --bs-table-color: var(--fg);
-}
 
-html.light-theme .table-wrap .table tbody tr:nth-of-type(odd) {
-  background-color: var(--row-alt) !important;
-  color: var(--fg) !important;
-}
 
-html.light-theme .table-wrap .table tbody tr:nth-of-type(even) {
-  background-color: var(--bg) !important;
-  color: var(--fg) !important;
-}
 
-html.light-theme .table-wrap .table tbody tr:hover {
-  background-color: var(--row-hover) !important;
-  color: var(--fg) !important;
-}
+
+
+
+
 
 .text-left { text-align:left; max-width:1400px; margin:0 auto 24px; }
 
@@ -289,4 +263,17 @@ html.dark-theme .dataTables_wrapper .dataTables_paginate .paginate_button.curren
   padding: 1rem;
   box-shadow: var(--shadow-1);
   margin-bottom: 2rem;
+}
+
+html.dark-theme .card-body .text-muted {
+  color: #9ca3af !important;
+}
+html.dark-theme .card-body .card-text {
+  color: #e5e7eb;
+}
+html.dark-theme .card-body .text-success {
+  color: #34d399 !important;
+}
+html.dark-theme .card-body .text-danger {
+  color: #f87171 !important;
 }
