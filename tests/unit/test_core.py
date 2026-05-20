@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dpat import (
     Config, NTDSProcessor, HashProcessor, DataSanitizer, 
-    HTMLReportBuilder, DatabaseManager, GroupManager, CrackedPasswordProcessor,
+    HTMLReportBuilder, DatabaseManager, BloodHoundManager, CrackedPasswordProcessor,
     calculate_percentage
 )
 from tests import TestConfig, TestDataGenerator, DatabaseTestHelper, DPATTestCase
@@ -271,7 +271,7 @@ class TestHTMLReportBuilder(DPATTestCase):
     
     def test_navbar_link_custom_filename(self):
         """Test navbar link uses custom filename when specified."""
-        builder = HTMLReportBuilder(str(self.temp_dir), main_report_file="custom_report.html")
+        builder = HTMLReportBuilder([], main_report_file="custom_report.html")
         builder.add_content("<h1>Test Report</h1>")
         
         html = builder.generate_html()
@@ -352,83 +352,86 @@ class TestDatabaseManager(DPATTestCase):
             db_manager.cursor.execute("SELECT 1")
 
 
-class TestGroupManager(DPATTestCase):
-    """Test the GroupManager class."""
+class TestBloodHoundManager(DPATTestCase):
+    """Test the BloodHoundManager class."""
     
-    def test_group_manager_creation(self):
-        """Test group manager creation."""
+    def test_manager_creation(self):
+        """Test manager creation."""
         config = Config(
             ntds_file="test.ntds",
             cracked_file="test.pot",
             min_password_length=8,
-            groups_directory=str(self.temp_dir)
+            bloodhound_files=[]
         )
         
-        manager = GroupManager(config)
+        manager = BloodHoundManager(config)
         
         self.assertEqual(manager.groups, [])
         self.assertEqual(manager.group_users, {})
+        self.assertEqual(manager.kerberoastable_users, [])
+        self.assertEqual(manager.asreproastable_users, [])
     
-    def test_load_groups_no_directory(self):
-        """Test loading groups when no directory is specified."""
+    def test_load_data_no_files(self):
+        """Test loading data when no files are specified."""
         config = Config(
             ntds_file="test.ntds",
             cracked_file="test.pot",
             min_password_length=8
         )
         
-        manager = GroupManager(config)
-        manager.load_groups()
+        manager = BloodHoundManager(config)
+        manager.load_data()
         
         self.assertEqual(len(manager.groups), 0)
     
-    def test_load_groups_with_files(self):
-        """Test loading groups from files."""
-        # Create test group files
-        group_files = self.file_manager.create_group_files({
-            "Domain Admins": ["DOMAIN\\admin1", "DOMAIN\\admin2"],
-            "Enterprise Admins": ["DOMAIN\\admin1", "DOMAIN\\superadmin"]
-        })
+    def test_load_data_with_files(self):
+        """Test loading data from files."""
+        import json
+        bh_file = self.temp_dir / "bh_test.json"
+        with open(bh_file, "w") as f:
+            json.dump({
+                "meta": {"type": "groups"},
+                "data": [
+                    {
+                        "Properties": {"name": "DOMAIN ADMINS@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-512",
+                        "Members": [
+                            {"ObjectIdentifier": "S-1-5-21-1-1", "ObjectType": "User"}
+                        ]
+                    }
+                ]
+            }, f)
+
+        bh_users_file = self.temp_dir / "bh_users.json"
+        with open(bh_users_file, "w") as f:
+            json.dump({
+                "meta": {"type": "users"},
+                "data": [
+                    {
+                        "Properties": {"name": "jdoe@TEST.LOCAL", "domain": "test.local", "hasspn": True},
+                        "ObjectIdentifier": "S-1-5-21-1-1"
+                    }
+                ]
+            }, f)
         
         config = Config(
             ntds_file="test.ntds",
             cracked_file="test.pot",
             min_password_length=8,
-            groups_directory=str(self.temp_dir)
+            bloodhound_files=[str(bh_file), str(bh_users_file)]
         )
         
-        manager = GroupManager(config)
-        manager.load_groups()
+        manager = BloodHoundManager(config)
+        manager.load_data()
         
-        self.assertEqual(len(manager.groups), 2)
+        self.assertEqual(len(manager.groups), 1)
         group_names = [group[0] for group in manager.groups]
         self.assertIn("Domain Admins", group_names)
-        self.assertIn("Enterprise Admins", group_names)
-    
-    def test_load_group_members(self):
-        """Test loading group members."""
-        # Create test group files
-        group_files = self.file_manager.create_group_files({
-            "Domain Admins": ["DOMAIN\\admin1", "DOMAIN\\admin2"],
-            "Enterprise Admins": ["DOMAIN\\admin1", "DOMAIN\\superadmin"]
-        })
-        
-        config = Config(
-            ntds_file="test.ntds",
-            cracked_file="test.pot",
-            min_password_length=8,
-            groups_directory=str(self.temp_dir)
-        )
-        
-        manager = GroupManager(config)
-        manager.load_groups()
-        manager.load_group_members()
         
         self.assertIn("Domain Admins", manager.group_users)
-        self.assertIn("Enterprise Admins", manager.group_users)
-        self.assertEqual(len(manager.group_users["Domain Admins"]), 2)
-        self.assertEqual(len(manager.group_users["Enterprise Admins"]), 2)
+        self.assertEqual(len(manager.group_users["Domain Admins"]), 1)
 
+        self.assertEqual(len(manager.kerberoastable_users), 1)
 
 class TestCrackedPasswordProcessor(DPATTestCase):
     """Test the CrackedPasswordProcessor class."""
