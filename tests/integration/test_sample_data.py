@@ -90,3 +90,59 @@ class TestSampleDataIntegration(DPATTestCase):
         
         db_manager.close()
     
+    def test_sample_data_with_groups(self):
+        """Test processing with Domain Admins and Enterprise Admins group files."""
+        import json
+        bh_file = self.temp_dir / "bh_test.json"
+        with open(bh_file, "w") as f:
+            json.dump({
+                "meta": {"type": "groups"},
+                "data": [
+                    {
+                        "Properties": {"name": "DOMAIN ADMINS@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-512",
+                        "Members": []
+                    }
+                ]
+            }, f)
+
+        config = Config(
+            ntds_file=str(self.ntds_file),
+            cracked_file=str(self.cracked_file),
+            min_password_length=8,
+            bloodhound_files=[str(bh_file)],
+            report_directory=str(self.temp_dir)
+        )
+
+        # Process data
+        db_manager = DatabaseManager(config)
+        bloodhound_manager = BloodHoundManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+
+        # Load groups
+        bloodhound_manager.load_data()
+
+        # Create schema with group columns
+        group_names = [group[0] for group in bloodhound_manager.groups]
+        db_manager.create_schema(group_names)
+
+        # Process data
+        ntds_processor.process_ntds_file()
+        ntds_processor.update_group_membership(bloodhound_manager)
+        cracked_processor.process_cracked_file()
+
+        # Verify group processing
+        cursor = db_manager.cursor
+
+        # Check schema was created properly
+        for group_name in group_names:
+            cursor.execute(f"PRAGMA table_info(hash_infos)")
+            columns = [info[1] for info in cursor.fetchall()]
+            self.assertIn(group_name, columns, f"Column {group_name} should exist in schema")
+
+        db_manager.close()
+
+    def test_sample_data_powerview_format(self):
+        # Skipped as power view is deprecated for BH
+        pass
