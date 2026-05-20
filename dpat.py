@@ -23,7 +23,7 @@ import sys
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from shutil import copyfile
+from shutil import copyfile, copytree
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # Configure logging
@@ -548,8 +548,8 @@ class HTMLReportBuilder:
         width = "50%" if chart_type == "pie" else "100%"
         
         chart_html = f"""
-<div class='table-wrap' style='text-align: center;'>
-    <div class='chart-container' style='position: relative; width: {width}; margin: 20px auto; display: inline-block;'>
+<div class="card shadow-sm h-100">
+    <div class="card-body">
         <canvas id='{chart_id}'></canvas>
     </div>
 </div>
@@ -577,9 +577,9 @@ class HTMLReportBuilder:
             "<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
             "<title>DPAT Report</title>\n"
             "<!-- Bootstrap 5 CSS -->\n"
-            "<link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css' rel='stylesheet'>\n"
+            "<link href='assets/bootstrap.min.css' rel='stylesheet'>\n"
             "<!-- DataTables Bootstrap 5 CSS -->\n"
-            "<link href='https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css' rel='stylesheet'>\n"
+            "<link href='assets/dataTables.bootstrap5.min.css' rel='stylesheet'>\n"
             "<!-- Custom CSS -->\n"
             "<link rel='stylesheet' href='report.css'>\n"
             "</head>\n<body>\n"
@@ -627,14 +627,14 @@ class HTMLReportBuilder:
             + self.body_content +
             "</div>\n"
             "<!-- Bootstrap 5 JS -->\n"
-            "<script src='https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js'></script>\n"
+            "<script src='assets/bootstrap.bundle.min.js'></script>\n"
             "<!-- jQuery (required for DataTables) -->\n"
-            "<script src='https://code.jquery.com/jquery-3.7.0.min.js'></script>\n"
+            "<script src='assets/jquery-3.7.0.min.js'></script>\n"
             "<!-- DataTables JS -->\n"
-            "<script src='https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js'></script>\n"
-            "<script src='https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js'></script>\n"
+            "<script src='assets/jquery.dataTables.min.js'></script>\n"
+            "<script src='assets/dataTables.bootstrap5.min.js'></script>\n"
             "<!-- Chart.js -->\n"
-            "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>\n"
+            "<script src='assets/chart.js'></script>\n"
             "<script>\n"
             "// Dark mode toggle functionality and DataTables initialization\n"
             "document.addEventListener('DOMContentLoaded', function() {\n"
@@ -787,6 +787,12 @@ class HTMLReportBuilder:
         icon_dest = Path(self.report_directory) / "DPAT icon.png"
         if icon_source.exists():
             copyfile(icon_source, icon_dest)
+
+        # Copy assets directory
+        assets_source = Path(__file__).parent / "assets"
+        assets_dest = Path(self.report_directory) / "assets"
+        if assets_source.exists():
+            copytree(assets_source, assets_dest, dirs_exist_ok=True)
         
         # Write HTML file
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -1792,10 +1798,48 @@ def main():
         # Generate main summary report
         summary_builder = HTMLReportBuilder(config.report_directory, config.output_file)
         
+        # Extract Key Metrics for dashboard
+        k_total_hashes = next((row[0] for row in summary_table if "Password Hashes" == row[2]), 0)
+        k_cracked_count = next((row[0] for row in summary_table if "Passwords Discovered Through Cracking" == row[2]), 0)
+        k_cracked_percent = next((row[1] for row in summary_table if "Passwords Discovered Through Cracking" == row[2]), 0)
+        k_policy_violations = next((row[0] for row in summary_table if "Password Policy Violations" == row[2]), 0)
+
+        key_metrics_html = f"""
+        <div class="row g-4 mb-4">
+            <div class="col-md-4">
+                <div class="card shadow-sm h-100 text-center">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted text-uppercase fw-bold">Total Hashes</h6>
+                        <h2 class="card-text mb-0 fw-bold">{k_total_hashes}</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card shadow-sm h-100 text-center">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted text-uppercase fw-bold">Cracked Passwords</h6>
+                        <h2 class="card-text mb-0 fw-bold">{k_cracked_count} <small class="text-muted fs-5">({k_cracked_percent}%)</small></h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card shadow-sm h-100 text-center">
+                    <div class="card-body">
+                        <h6 class="card-title text-muted text-uppercase fw-bold">Policy Violations</h6>
+                        <h2 class="card-text mb-0 fw-bold {'text-danger' if k_policy_violations > 0 else 'text-success'}">{k_policy_violations}</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+        """
+        summary_builder.add_content(key_metrics_html)
+
         # Add the summary table first
         summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
         
         # Add charts after the summary table
+        summary_builder.add_content('<div class="row g-4 mb-4">')
+
         # Password Length Distribution Chart
         db_manager.cursor.execute('''SELECT LENGTH(password) as plen, COUNT(password) as count 
                                     FROM hash_infos 
@@ -1846,7 +1890,9 @@ def main():
                 }
             }
             
+            summary_builder.add_content('<div class="col-md-6">')
             summary_builder.add_chart("passwordLengthChart", "bar", length_chart_data, length_chart_options)
+            summary_builder.add_content('</div>')
         
         # Password Cracking Success Chart
         cracked_count = next((row[0] for row in summary_table if "Passwords Discovered Through Cracking" in str(row[2])), 0)
@@ -1873,7 +1919,9 @@ def main():
                 }
             }
             
+            summary_builder.add_content('<div class="col-md-6">')
             summary_builder.add_chart("crackingSuccessChart", "pie", crack_chart_data, crack_chart_options)
+            summary_builder.add_content('</div>')
         
         # Top 10 Most Common Passwords Chart
         db_manager.cursor.execute('''SELECT password, COUNT(password) as count 
@@ -1926,7 +1974,11 @@ def main():
                 }
             }
             
+            summary_builder.add_content('<div class="col-12">')
             summary_builder.add_chart("topPasswordsChart", "bar", top_passwords_chart_data, top_passwords_chart_options)
+            summary_builder.add_content('</div>')
+
+        summary_builder.add_content('</div>') # Close the row
         
         summary_builder.write_report(config.output_file)
         

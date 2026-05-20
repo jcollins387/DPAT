@@ -89,6 +89,19 @@ a:focus {
   height: 32px;
 }
 
+/* ---------- Card styles ---------- */
+.card {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+}
+@media (prefers-color-scheme: dark) {
+  .card { background: #1f2937; }
+}
+html.dark-theme .card { background: #1f2937; border-color: var(--border); }
+html.light-theme .card { background: white; border-color: var(--border); }
+
 /* ---------- Table styles ---------- */
 .table-wrap {
   width: 100%;
