@@ -979,16 +979,23 @@ class BloodHoundManager:
 
     def _resolve_groups(self) -> None:
         """Resolve members for specific groups we want to track."""
-        target_sids = {}
+        from collections import defaultdict
+        target_sids = defaultdict(list)
         for sid, name in self._sid_to_name.items():
             short_name = name.split("@")[0].upper()
             if short_name in self._group_names_to_track:
                 display_name = short_name.title()
-                target_sids[display_name] = sid
+                target_sids[display_name].append(sid)
 
-        for display_name, sid in target_sids.items():
-            self.groups.append((display_name, sid))
-            resolved_members = self._get_all_members(sid, set())
+        for display_name, sids in target_sids.items():
+            # For backward compatibility, just store the first SID in self.groups
+            # or maybe store None if it's multiple? We can just append all, but
+            # actually we only append one entry per group name to self.groups
+            self.groups.append((display_name, sids[0] if sids else None))
+
+            resolved_members = set()
+            for sid in sids:
+                resolved_members.update(self._get_all_members(sid, set()))
 
             user_names = []
             for member_sid in resolved_members:
