@@ -956,10 +956,10 @@ class BloodHoundManager:
                 self._sid_to_name[sid] = formatted_name
 
             if props.get("hasspn") is True:
-                self.kerberoastable_users.append(formatted_name)
+                self.kerberoastable_users.append(short_name)
 
             if props.get("dontreqpreauth") is True:
-                self.asreproastable_users.append(formatted_name)
+                self.asreproastable_users.append(short_name)
 
     def _process_groups(self, groups_data: list) -> None:
         """Map group SIDs and their members."""
@@ -1424,6 +1424,7 @@ def main():
         
         # Kerberoastable Accounts
         if bloodhound_manager.kerberoastable_users:
+            print(f"Number of user accounts with SPNs set: {len(bloodhound_manager.kerberoastable_users)}")
             kerb_usernames = tuple(bloodhound_manager.kerberoastable_users)
             total_kerb_accts = len(kerb_usernames)
             placeholders = ",".join("?" * total_kerb_accts)
@@ -1431,7 +1432,7 @@ def main():
             db_manager.cursor.execute(f'''
                 SELECT username_full, nt_hash, password
                 FROM   hash_infos
-                WHERE  username_full IN ({placeholders})
+                WHERE  username IN ({placeholders})
                   AND  password IS NOT NULL
                   AND  history_index = -1
             ''', kerb_usernames)
@@ -1460,6 +1461,7 @@ def main():
 
         # ASREPRoastable Accounts
         if bloodhound_manager.asreproastable_users:
+            print(f"Number of user accounts with DONT_REQ_PREAUTH set: {len(bloodhound_manager.asreproastable_users)}")
             asrep_usernames = tuple(bloodhound_manager.asreproastable_users)
             total_asrep_accts = len(asrep_usernames)
             placeholders = ",".join("?" * total_asrep_accts)
@@ -1467,7 +1469,7 @@ def main():
             db_manager.cursor.execute(f'''
                 SELECT username_full, nt_hash, password
                 FROM   hash_infos
-                WHERE  username_full IN ({placeholders})
+                WHERE  username IN ({placeholders})
                   AND  password IS NOT NULL
                   AND  history_index = -1
             ''', asrep_usernames)
