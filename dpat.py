@@ -585,24 +585,8 @@ class HTMLReportBuilder:
             "</head>\n<body>\n"
             "<!-- Immediate theme application script -->\n"
             "<script>\n"
-            "  // Apply theme immediately when HTML is parsed (before DOM ready)\n"
-            "  (function() {\n"
-            "    const savedTheme = localStorage.getItem('theme');\n"
-            "    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;\n"
-            "    \n"
-            "    let isDark;\n"
-            "    if (savedTheme !== null) {\n"
-            "      isDark = savedTheme === 'dark';\n"
-            "    } else {\n"
-            "      isDark = prefersDark;\n"
-            "    }\n"
-            "    \n"
-            "    if (isDark) {\n"
-            "      document.documentElement.classList.add('dark-theme');\n"
-            "    } else {\n"
-            "      document.documentElement.classList.add('light-theme');\n"
-            "    }\n"
-            "  })();\n"
+            "  // Apply dark theme immediately\n"
+            "  document.documentElement.classList.add('dark-theme');\n"
             "</script>\n"
             "<!-- Bootstrap 5 Navbar -->\n"
             "<nav class='navbar navbar-expand-lg navbar-dark bg-primary fixed-top'>\n"
@@ -613,11 +597,7 @@ class HTMLReportBuilder:
             "    </button>\n"
             "    <div class='collapse navbar-collapse' id='navbarNav'>\n"
             "      <ul class='navbar-nav ms-auto'>\n"
-            "        <li class='nav-item'>\n"
-            "          <button id='theme-toggle' class='btn btn-outline-light btn-sm' aria-label='Toggle dark mode'>\n"
-            "            <span class='theme-toggle-icon'>🌙</span>\n"
-            "          </button>\n"
-            "        </li>\n"
+            "        \n"
             "      </ul>\n"
             "    </div>\n"
             "  </div>\n"
@@ -638,17 +618,6 @@ class HTMLReportBuilder:
             "<script>\n"
             "// Dark mode toggle functionality and DataTables initialization\n"
             "document.addEventListener('DOMContentLoaded', function() {\n"
-            "  const themeToggle = document.getElementById('theme-toggle');\n"
-            "  const themeIcon = themeToggle.querySelector('.theme-toggle-icon');\n"
-            "  \n"
-            "  // Set initial toggle button icon based on current theme\n"
-            "  const isCurrentlyDark = document.documentElement.classList.contains('dark-theme');\n"
-            "  if (isCurrentlyDark) {\n"
-            "    themeIcon.textContent = '☀️';\n"
-            "  } else {\n"
-            "    themeIcon.textContent = '🌙';\n"
-            "  }\n"
-            "  \n"
             "  // Function to initialize DataTables\n"
             "  function initializeDataTables() {\n"
             "    $('.datatable').each(function() {\n"
@@ -712,28 +681,6 @@ class HTMLReportBuilder:
             "    });\n"
             "  }\n"
             "  \n"
-            "  // Toggle theme on button click\n"
-            "  themeToggle.addEventListener('click', function() {\n"
-            "    const isCurrentlyDark = document.documentElement.classList.contains('dark-theme');\n"
-            "    \n"
-            "    if (isCurrentlyDark) {\n"
-            "      document.documentElement.classList.remove('dark-theme');\n"
-            "      document.documentElement.classList.add('light-theme');\n"
-            "      themeIcon.textContent = '🌙';\n"
-            "      localStorage.setItem('theme', 'light');\n"
-            "    } else {\n"
-            "      document.documentElement.classList.remove('light-theme');\n"
-            "      document.documentElement.classList.add('dark-theme');\n"
-            "      themeIcon.textContent = '☀️';\n"
-            "      localStorage.setItem('theme', 'dark');\n"
-            "    }\n"
-            "    \n"
-            "    // Reinitialize DataTables after theme change to fix layout issues\n"
-            "    setTimeout(function() {\n"
-            "      initializeDataTables();\n"
-            "    }, 100);\n"
-            "  });\n"
-            "  \n"
             "  // Initialize DataTables for all tables (with delay for large tables)\n"
             "  setTimeout(function() {\n"
             "    initializeDataTables();\n"
@@ -742,6 +689,8 @@ class HTMLReportBuilder:
             "  // Initialize charts after Chart.js loads\n"
             "  function initializeCharts() {\n"
             "    if (typeof Chart !== 'undefined') {\n"
+            "      Chart.defaults.color = '#e5e7eb';\n"
+            "      Chart.defaults.borderColor = '#374151';\n"
             "      const chartsData = " + json.dumps(self.charts_data) + ";\n"
             "      chartsData.forEach(function(chartConfig) {\n"
             "        const ctx = document.getElementById(chartConfig.id).getContext('2d');\n"
@@ -962,10 +911,10 @@ class BloodHoundManager:
                 self._sid_to_name[sid] = formatted_name
 
             if props.get("hasspn") is True:
-                self.kerberoastable_users.append(short_name)
+                self.kerberoastable_users.append(formatted_name)
 
             if props.get("dontreqpreauth") is True:
-                self.asreproastable_users.append(short_name)
+                self.asreproastable_users.append(formatted_name)
 
     def _process_groups(self, groups_data: list) -> None:
         """Map group SIDs and their members."""
@@ -989,6 +938,8 @@ class BloodHoundManager:
         target_sids = defaultdict(list)
         for sid, name in self._sid_to_name.items():
             short_name = name.split("@")[0].upper()
+            if '\\' in short_name:
+                short_name = short_name.split('\\')[-1]
             if short_name in self._group_names_to_track:
                 display_name = short_name.title()
                 target_sids[display_name].append(sid)
@@ -1438,7 +1389,7 @@ def main():
             db_manager.cursor.execute(f'''
                 SELECT username_full, nt_hash, password
                 FROM   hash_infos
-                WHERE  username IN ({placeholders})
+                WHERE  username_full IN ({placeholders})
                   AND  password IS NOT NULL
                   AND  history_index = -1
             ''', kerb_usernames)
@@ -1475,7 +1426,7 @@ def main():
             db_manager.cursor.execute(f'''
                 SELECT username_full, nt_hash, password
                 FROM   hash_infos
-                WHERE  username IN ({placeholders})
+                WHERE  username_full IN ({placeholders})
                   AND  password IS NOT NULL
                   AND  history_index = -1
             ''', asrep_usernames)
@@ -1834,10 +1785,7 @@ def main():
         """
         summary_builder.add_content(key_metrics_html)
 
-        # Add the summary table first
-        summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
-        
-        # Add charts after the summary table
+        # Add charts before the summary table
         summary_builder.add_content('<div class="row g-4 mb-4">')
 
         # Password Length Distribution Chart
@@ -1856,7 +1804,7 @@ def main():
                 "datasets": [{
                     "label": "Number of Passwords",
                     "data": length_counts,
-                    "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                    "backgroundColor": "rgba(54, 162, 235, 0.6)",
                     "borderColor": "rgba(54, 162, 235, 1)",
                     "borderWidth": 1
                 }]
@@ -1890,7 +1838,7 @@ def main():
                 }
             }
             
-            summary_builder.add_content('<div class="col-md-6">')
+            summary_builder.add_content('<div class="col-md-8">')
             summary_builder.add_chart("passwordLengthChart", "bar", length_chart_data, length_chart_options)
             summary_builder.add_content('</div>')
         
@@ -1903,7 +1851,7 @@ def main():
                 "labels": ["Cracked Passwords", "Uncracked Passwords"],
                 "datasets": [{
                     "data": [cracked_count, uncracked_count],
-                    "backgroundColor": ["rgba(75, 192, 192, 0.2)", "rgba(255, 99, 132, 0.2)"],
+                    "backgroundColor": ["rgba(75, 192, 192, 0.6)", "rgba(255, 99, 132, 0.6)"],
                     "borderColor": ["rgba(75, 192, 192, 1)", "rgba(255, 99, 132, 1)"],
                     "borderWidth": 1
                 }]
@@ -1919,7 +1867,7 @@ def main():
                 }
             }
             
-            summary_builder.add_content('<div class="col-md-6">')
+            summary_builder.add_content('<div class="col-md-4">')
             summary_builder.add_chart("crackingSuccessChart", "pie", crack_chart_data, crack_chart_options)
             summary_builder.add_content('</div>')
         
@@ -1940,7 +1888,7 @@ def main():
                 "datasets": [{
                     "label": "Usage Count",
                     "data": password_counts,
-                    "backgroundColor": "rgba(255, 159, 64, 0.2)",
+                    "backgroundColor": "rgba(255, 159, 64, 0.6)",
                     "borderColor": "rgba(255, 159, 64, 1)",
                     "borderWidth": 1
                 }]
@@ -1979,6 +1927,10 @@ def main():
             summary_builder.add_content('</div>')
 
         summary_builder.add_content('</div>') # Close the row
+
+        # Add the summary table after charts
+        summary_builder.add_table(summary_table, ("Count", "Percent", "Description", "More Info"), cols_to_not_escape=3)
+
         
         summary_builder.write_report(config.output_file)
         
