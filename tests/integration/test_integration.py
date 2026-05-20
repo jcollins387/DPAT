@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dpat import (
     Config, NTDSProcessor, HashProcessor, DataSanitizer, 
-    HTMLReportBuilder, DatabaseManager, GroupManager, CrackedPasswordProcessor,
+    HTMLReportBuilder, DatabaseManager, BloodHoundManager, CrackedPasswordProcessor,
     parse_arguments, main
 )
 from tests import (
@@ -45,28 +45,414 @@ class TestNTDSProcessingIntegration(DPATTestCase):
             ntds_file=str(ntds_file),
             cracked_file=str(cracked_file),
             min_password_length=8,
-            groups_directory=str(self.temp_dir)
+            bloodhound_files=[]
         )
         
         # Initialize components
         db_manager = DatabaseManager(config)
-        group_manager = GroupManager(config)
+        bloodhound_manager = BloodHoundManager(config)
         ntds_processor = NTDSProcessor(config, db_manager)
         cracked_processor = CrackedPasswordProcessor(config, db_manager)
         
         # Load groups
-        group_manager.load_groups()
-        group_manager.load_group_members()
+        bloodhound_manager.load_data()
         
         # Create database schema
-        group_names = [group[0] for group in group_manager.groups]
+        group_names = [group[0] for group in bloodhound_manager.groups]
         db_manager.create_schema(group_names)
         
         # Process NTDS file
         ntds_processor.process_ntds_file()
         
         # Update group membership
-        ntds_processor.update_group_membership(group_manager)
+        ntds_processor.update_group_membership(bloodhound_manager)
+
+        # Process cracked passwords
+        cracked_processor.process_cracked_file()
+
+        # Verify results
+        cursor = db_manager.cursor
+
+        # Check that accounts were processed
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE history_index = -1")
+        account_count = cursor.fetchone()[0]
+        self.assertGreater(account_count, 0)
+
+        # Check that some passwords were cracked
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE password IS NOT NULL AND history_index = -1")
+        cracked_count = cursor.fetchone()[0]
+        self.assertGreater(cracked_count, 0)
+
+        # Check that group membership was updated
+        for group_name in group_names:
+            cursor.execute(f'SELECT COUNT(*) FROM hash_infos WHERE "{group_name}" = 1')
+            group_count = cursor.fetchone()[0]
+            self.assertGreater(group_count, 0)
+
+        db_manager.close()
+
+    def test_account_filtering(self):
+        """Test account filtering functionality."""
+        # Create test NTDS file with machine accounts and krbtgt
+        test_data = [
+            "DOMAIN\\user1:1001:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0::::",
+            "DOMAIN\\machine$:1002:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0::::",
+            "DOMAIN\\krbtgt:1003:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0::::",
+        ]
+
+        ntds_file = self.file_manager.create_file("test.ntds", test_data)
+        cracked_file = self.file_manager.create_file("test.pot", ["31d6cfe0d16ae931b73c59d7e0c089c0:password"])
+
+        # Test with default filtering (exclude machine accounts and krbtgt)
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8
+        )
+
+        db_manager = DatabaseManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+
+        db_manager.create_schema([])
+        ntds_processor.process_ntds_file()
+
+        cursor = db_manager.cursor
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE history_index = -1")
+        count_default = cursor.fetchone()[0]
+
+        db_manager.close()
+
+        # Test with machine accounts and krbtgt included
+        config.include_machine_accounts = True
+        config.include_krbtgt = True
+
+        db_manager = DatabaseManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+
+        db_manager.create_schema([])
+        ntds_processor.process_ntds_file()
+
+        cursor = db_manager.cursor
+        cursor.execute("SELECT COUNT(*) FROM hash_infos WHERE history_index = -1")
+        count_included = cursor.fetchone()[0]
+
+        db_manager.close()
+
+        # Should have more accounts when machine accounts and krbtgt are included
+        self.assertGreater(count_included, count_default)
+        self.assertEqual(count_default, 1)  # Only user1
+        self.assertEqual(count_included, 3)  # All three accounts
+
+
+class TestReportGenerationIntegration(DPATTestCase):
+    """Integration tests for report generation."""
+
+    def test_html_report_generation(self):
+        """Test HTML report generation."""
+        # Create test data
+        ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
+        cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
+
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            report_directory=str(self.temp_dir)
+        )
+
+        # Process data
+        db_manager = DatabaseManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+
+        db_manager.create_schema([])
+        ntds_processor.process_ntds_file()
+        cracked_processor.process_cracked_file()
+
+        # Generate reports
+        sanitizer = DataSanitizer()
+
+        # Generate all hashes report
+        cursor = db_manager.cursor
+        cursor.execute('''
+            SELECT username_full, password, LENGTH(password) as plen, nt_hash, only_lm_cracked
+            FROM hash_infos
+            WHERE history_index = -1
+            ORDER BY plen DESC, password
+        ''')
+
+        rows = cursor.fetchall()
+        sanitized_rows = [sanitizer.sanitize_table_row(row, [1], [3], config.sanitize_output)
+                         for row in rows]
+
+        report_builder = HTMLReportBuilder(config.report_directory)
+        report_builder.add_table(sanitized_rows,
+                               ["Username", "Password", "Password Length", "NT Hash", "Only LM Cracked"])
+        report_builder.write_report("all_hashes.html")
+
+        # Verify report was created
+        report_path = Path(config.report_directory) / "all_hashes.html"
+        self.assert_file_exists(report_path)
+        self.assert_file_contains(report_path, "<table")
+        self.assert_file_contains(report_path, "Username")
+        self.assert_file_contains(report_path, "Password")
+
+        db_manager.close()
+
+    def test_sanitized_report_generation(self):
+        """Test sanitized report generation."""
+        # Create test data
+        ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
+        cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
+
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            report_directory=str(self.temp_dir),
+            sanitize_output=True
+        )
+
+        # Process data
+        db_manager = DatabaseManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+
+        db_manager.create_schema([])
+        ntds_processor.process_ntds_file()
+        cracked_processor.process_cracked_file()
+
+        # Generate sanitized report
+        sanitizer = DataSanitizer()
+
+        cursor = db_manager.cursor
+        cursor.execute('''
+            SELECT username_full, password, nt_hash
+            FROM hash_infos
+            WHERE history_index = -1 AND password IS NOT NULL
+            LIMIT 1
+        ''')
+
+        row = cursor.fetchone()
+        if row:
+            sanitized_row = sanitizer.sanitize_table_row(row, [1], [2], config.sanitize_output)
+
+            report_builder = HTMLReportBuilder(config.report_directory)
+            report_builder.add_table([sanitized_row], ["Username", "Password", "NT Hash"])
+            report_builder.write_report("sanitized_test.html")
+
+            # Verify sanitization
+            report_path = Path(config.report_directory) / "sanitized_test.html"
+            self.assert_file_exists(report_path)
+
+            with open(report_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Should contain sanitized password (not the original)
+                self.assertIn("*", content)
+                # Should not contain the original password
+                if row[1]:  # If there was a password
+                    self.assertNotIn(row[1], content)
+
+        db_manager.close()
+
+
+class TestGroupProcessingIntegration(DPATTestCase):
+    """Integration tests for group processing."""
+
+    def test_group_membership_processing(self):
+        """Test group membership processing."""
+        # Create test data
+        ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
+        cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
+
+        import json
+        bh_file = self.temp_dir / "bh_test.json"
+        with open(bh_file, "w") as f:
+            json.dump({
+                "meta": {"type": "groups"},
+                "data": [
+                    {
+                        "Properties": {"name": "DOMAIN ADMINS@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-512",
+                        "Members": [
+                            {"ObjectIdentifier": "S-1-5-21-1-1", "ObjectType": "User"}
+                        ]
+                    }
+                ]
+            }, f)
+
+        bh_users_file = self.temp_dir / "bh_users.json"
+        with open(bh_users_file, "w") as f:
+            json.dump({
+                "meta": {"type": "users"},
+                "data": [
+                    {
+                        "Properties": {"name": "jdoe@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-1"
+                    }
+                ]
+            }, f)
+
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            bloodhound_files=[str(bh_file), str(bh_users_file)]
+        )
+
+        # Process data
+        db_manager = DatabaseManager(config)
+        bloodhound_manager = BloodHoundManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+
+        # Load groups
+        bloodhound_manager.load_data()
+
+        # Create schema with group columns
+        group_names = [group[0] for group in bloodhound_manager.groups]
+        db_manager.create_schema(group_names)
+
+        # Process NTDS and update group membership
+        ntds_processor.process_ntds_file()
+        ntds_processor.update_group_membership(bloodhound_manager)
+
+        # Verify group membership
+        cursor = db_manager.cursor
+
+        for group_name in group_names:
+            cursor.execute(f'SELECT COUNT(*) FROM hash_infos WHERE "{group_name}" = 1')
+            count = cursor.fetchone()[0]
+            self.assertGreater(count, 0, f"Group {group_name} should have members")
+
+        db_manager.close()
+
+    def test_group_report_generation(self):
+        """Test group report generation."""
+        # Create test data
+        ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
+        cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
+
+        import json
+        bh_file = self.temp_dir / "bh_test.json"
+        with open(bh_file, "w") as f:
+            json.dump({
+                "meta": {"type": "groups"},
+                "data": [
+                    {
+                        "Properties": {"name": "DOMAIN ADMINS@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-512",
+                        "Members": [
+                            {"ObjectIdentifier": "S-1-5-21-1-1", "ObjectType": "User"}
+                        ]
+                    }
+                ]
+            }, f)
+
+        bh_users_file = self.temp_dir / "bh_users.json"
+        with open(bh_users_file, "w") as f:
+            json.dump({
+                "meta": {"type": "users"},
+                "data": [
+                    {
+                        "Properties": {"name": "jdoe@TEST.LOCAL", "domain": "test.local"},
+                        "ObjectIdentifier": "S-1-5-21-1-1"
+                    }
+                ]
+            }, f)
+
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            bloodhound_files=[str(bh_file), str(bh_users_file)],
+            report_directory=str(self.temp_dir)
+        )
+
+        # Process data
+        db_manager = DatabaseManager(config)
+        bloodhound_manager = BloodHoundManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+
+        bloodhound_manager.load_data()
+
+        group_names = [group[0] for group in bloodhound_manager.groups]
+        db_manager.create_schema(group_names)
+
+        ntds_processor.process_ntds_file()
+        ntds_processor.update_group_membership(bloodhound_manager)
+        cracked_processor.process_cracked_file()
+
+        # Generate reports (simulate the part of main() that generates group reports)
+        sanitizer = DataSanitizer()
+
+        for group_name, _ in bloodhound_manager.groups:
+            # Generate group members report
+            db_manager.cursor.execute(f'''SELECT username_full, nt_hash, password, lm_hash
+                                        FROM hash_infos
+                                        WHERE "{group_name}" = 1 AND history_index = -1
+                                        ORDER BY username_full''')
+            member_rows = db_manager.cursor.fetchall()
+
+            processed_member_rows = []
+            for username_full, nt_hash, password, lm_hash in member_rows:
+                processed_member_rows.append((username_full, nt_hash, username_full, 1, password, "Yes"))
+
+            sanitized_member_rows = [sanitizer.sanitize_table_row(row, [4], [1], config.sanitize_output)
+                                   for row in processed_member_rows]
+
+            member_builder = HTMLReportBuilder(config.report_directory)
+            member_builder.add_table(sanitized_member_rows, ["Username", "NT Hash", "Users Sharing this Hash", "Share Count", "Password", "Non-Blank LM Hash?"])
+
+            safe_group_name = group_name.replace(' ', '_')
+            members_filename = member_builder.write_report(f"{safe_group_name}_members.html")
+
+            # Verify report was created
+            report_path = self.temp_dir / members_filename
+            self.assert_file_exists(report_path)
+
+        db_manager.close()
+
+class TestNTDSProcessingIntegration(DPATTestCase):
+    """Integration tests for NTDS processing."""
+
+    def test_full_ntds_processing_workflow(self):
+        """Test complete NTDS processing workflow."""
+        # Create test NTDS file
+        ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
+
+        # Create test cracked file
+        cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
+
+        # Create test group files
+        group_files = self.file_manager.create_group_files(SAMPLE_GROUP_DATA)
+
+        # Create config
+        config = Config(
+            ntds_file=str(ntds_file),
+            cracked_file=str(cracked_file),
+            min_password_length=8,
+            bloodhound_files=[]
+        )
+
+        # Initialize components
+        db_manager = DatabaseManager(config)
+        bloodhound_manager = BloodHoundManager(config)
+        ntds_processor = NTDSProcessor(config, db_manager)
+        cracked_processor = CrackedPasswordProcessor(config, db_manager)
+
+        # Load groups
+        bloodhound_manager.load_data()
+
+        # Create database schema
+        group_names = [group[0] for group in bloodhound_manager.groups]
+        db_manager.create_schema(group_names)
+
+        # Process NTDS file
+        ntds_processor.process_ntds_file()
+
+        # Update group membership
+        ntds_processor.update_group_membership(bloodhound_manager)
         
         # Process cracked passwords
         cracked_processor.process_cracked_file()
@@ -273,25 +659,24 @@ class TestGroupProcessingIntegration(DPATTestCase):
             ntds_file=str(ntds_file),
             cracked_file=str(cracked_file),
             min_password_length=8,
-            groups_directory=str(self.temp_dir)
+            bloodhound_files=[]
         )
         
         # Process data
         db_manager = DatabaseManager(config)
-        group_manager = GroupManager(config)
+        bloodhound_manager = BloodHoundManager(config)
         ntds_processor = NTDSProcessor(config, db_manager)
         
         # Load groups
-        group_manager.load_groups()
-        group_manager.load_group_members()
+        bloodhound_manager.load_data()
         
         # Create schema with group columns
-        group_names = [group[0] for group in group_manager.groups]
+        group_names = [group[0] for group in bloodhound_manager.groups]
         db_manager.create_schema(group_names)
         
         # Process NTDS and update group membership
         ntds_processor.process_ntds_file()
-        ntds_processor.update_group_membership(group_manager)
+        ntds_processor.update_group_membership(bloodhound_manager)
         
         # Verify group membership
         cursor = db_manager.cursor
@@ -316,27 +701,26 @@ class TestGroupProcessingIntegration(DPATTestCase):
             ntds_file=str(ntds_file),
             cracked_file=str(cracked_file),
             min_password_length=8,
-            groups_directory=str(self.temp_dir),
+            bloodhound_files=[],
             report_directory=str(self.temp_dir)
         )
         
         # Process data
         db_manager = DatabaseManager(config)
-        group_manager = GroupManager(config)
+        bloodhound_manager = BloodHoundManager(config)
         ntds_processor = NTDSProcessor(config, db_manager)
         cracked_processor = CrackedPasswordProcessor(config, db_manager)
         
         # Load groups
-        group_manager.load_groups()
-        group_manager.load_group_members()
+        bloodhound_manager.load_data()
         
         # Create schema with group columns
-        group_names = [group[0] for group in group_manager.groups]
+        group_names = [group[0] for group in bloodhound_manager.groups]
         db_manager.create_schema(group_names)
         
         # Process data
         ntds_processor.process_ntds_file()
-        ntds_processor.update_group_membership(group_manager)
+        ntds_processor.update_group_membership(bloodhound_manager)
         cracked_processor.process_cracked_file()
         
         # Generate group reports
@@ -373,7 +757,7 @@ class TestCommandLineIntegration(DPATTestCase):
         '-n', 'test.ntds',
         '-c', 'test.pot',
         '-p', '8',
-        '-g', 'groups/',
+        '-b', 'bloodhound.json',
         '-s'
     ])
     def test_command_line_parsing(self):
@@ -383,7 +767,7 @@ class TestCommandLineIntegration(DPATTestCase):
         self.assertEqual(config.ntds_file, 'test.ntds')
         self.assertEqual(config.cracked_file, 'test.pot')
         self.assertEqual(config.min_password_length, 8)
-        self.assertEqual(config.groups_directory, 'groups/')
+        self.assertEqual(config.bloodhound_files, ['bloodhound.json'])
         self.assertTrue(config.sanitize_output)
     
     @patch('sys.argv', [
@@ -399,7 +783,7 @@ class TestCommandLineIntegration(DPATTestCase):
         self.assertEqual(config.ntds_file, 'test.ntds')
         self.assertEqual(config.cracked_file, 'test.pot')
         self.assertEqual(config.min_password_length, 8)
-        self.assertIsNone(config.groups_directory)
+        self.assertIsNone(config.bloodhound_files)
         self.assertFalse(config.sanitize_output)
     
     @patch('sys.argv', [
@@ -408,13 +792,11 @@ class TestCommandLineIntegration(DPATTestCase):
         '-c', 'test.pot',
         '-o', 'custom_report.html',
         '-d', 'custom_output/',
-        '-g', 'groups/',
+        '-b', 'bloodhound.json',
         '-p', '12',
         '-s',
         '-m',
         '-k',
-        '-kz', 'kerberoast.txt',
-        '--ch-encoding', 'utf-8',
         '-w',
         '-dbg'
     ])
@@ -426,13 +808,11 @@ class TestCommandLineIntegration(DPATTestCase):
         self.assertEqual(config.cracked_file, 'test.pot')
         self.assertEqual(config.output_file, 'custom_report.html')
         self.assertEqual(config.report_directory, 'custom_output/ - Sanitized')
-        self.assertEqual(config.groups_directory, 'groups/')
+        self.assertEqual(config.bloodhound_files, ['bloodhound.json'])
         self.assertEqual(config.min_password_length, 12)
         self.assertTrue(config.sanitize_output)
         self.assertTrue(config.include_machine_accounts)
         self.assertTrue(config.include_krbtgt)
-        self.assertEqual(config.kerberoast_file, 'kerberoast.txt')
-        self.assertEqual(config.kerberoast_encoding, 'utf-8')
         self.assertTrue(config.write_database)
         self.assertTrue(config.debug_mode)
 
@@ -513,8 +893,8 @@ class TestErrorHandlingIntegration(DPATTestCase):
         
         db_manager.close()
     
-    def test_empty_group_directory(self):
-        """Test handling of empty group directory."""
+    def test_empty_bloodhound_files(self):
+        """Test handling of empty bloodhound files."""
         ntds_file = self.file_manager.create_file("test.ntds", SAMPLE_NTDS_DATA)
         cracked_file = self.file_manager.create_file("test.pot", SAMPLE_CRACKED_DATA)
         
@@ -522,14 +902,14 @@ class TestErrorHandlingIntegration(DPATTestCase):
             ntds_file=str(ntds_file),
             cracked_file=str(cracked_file),
             min_password_length=8,
-            groups_directory=str(self.temp_dir)
+            bloodhound_files=[]
         )
         
-        group_manager = GroupManager(config)
+        bloodhound_manager = BloodHoundManager(config)
         
         # Should not raise an exception
-        group_manager.load_groups()
-        self.assertEqual(len(group_manager.groups), 0)
+        bloodhound_manager.load_data()
+        self.assertEqual(len(bloodhound_manager.groups), 0)
 
 
 class TestHistoryDataIntegration(DPATTestCase):

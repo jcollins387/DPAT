@@ -42,13 +42,12 @@ class Config:
     cracked_file: str
     output_file: str = "_DomainPasswordAuditReport.html"
     report_directory: str = "DPAT Report"
-    groups_directory: Optional[str] = None
+    bloodhound_files: Optional[List[str]] = None
+    enabled_only: bool = False
     min_password_length: int = 8
     sanitize_output: bool = False
     include_machine_accounts: bool = False
     include_krbtgt: bool = False
-    kerberoast_file: Optional[str] = None
-    kerberoast_encoding: str = 'cp1252'
     write_database: bool = False
     debug_mode: bool = False
     speed_mode: bool = False
@@ -253,14 +252,14 @@ class NTDSProcessor:
             logger.info(f"Filtered out {self.accounts_filtered} accounts (machine accounts, krbtgt)")
         logger.info(f"Processing {total_accounts} accounts for analysis")
     
-    def update_group_membership(self, group_manager: 'GroupManager') -> None:
+    def update_group_membership(self, bloodhound_manager: 'BloodHoundManager') -> None:
         """
         Update group membership flags in database.
         
         Args:
-            group_manager: Group manager instance
+            bloodhound_manager: Group manager instance
         """
-        for group_name, users in group_manager.group_users.items():
+        for group_name, users in bloodhound_manager.group_users.items():
             for user in users:
                 sql = f'UPDATE hash_infos SET "{group_name}" = 1 WHERE username_full = ?'
                 self.db_manager.cursor.execute(sql, (user,))
@@ -880,146 +879,140 @@ class DatabaseManager:
             logger.info("Database connection closed")
 
 
-class GroupManager:
-    """Manages group membership processing and file handling."""
+class BloodHoundManager:
+    """Manages parsing of BloodHound JSON files to extract users and groups."""
     
-    def __init__(self, config: Config):
+    def __init__(self, config):
         """
-        Initialize group manager.
+        Initialize BloodHound manager.
         
         Args:
             config: Application configuration
         """
         self.config = config
-        self.groups = []  # List of (group_name, file_path) tuples
+        self.groups = []  # List of (group_name, identifier) tuples
         self.group_users = {}  # Dict of {group_name: [usernames]}
-    
-    def load_groups(self) -> None:
-        """Load group files from the specified directory."""
-        if not self.config.groups_directory:
-            logger.info("No groups directory specified")
+        self.kerberoastable_users = []
+        self.asreproastable_users = []
+        
+        # Internal tracking for group resolution
+        self._sid_to_name = {}
+        self._sid_to_members = {}
+        self._group_names_to_track = ["DOMAIN ADMINS", "ENTERPRISE ADMINS"]
+        
+    def load_data(self) -> None:
+        """Parse the provided BloodHound files."""
+        if not self.config.bloodhound_files:
             return
-        
-        group_dir = Path(self.config.groups_directory)
-        if not group_dir.is_dir():
-            logger.error(f"Groups directory does not exist: {group_dir}")
-            return
-        
-        logger.info(f"Loading group files from: {group_dir}")
-        
-        # Files to exclude from group processing
-        exclude_files = {'.ntds', '.pot', '.potfile', '.dit'}
-        
-        for file_path in sorted(group_dir.iterdir()):
-            if file_path.is_file():
-                # Skip non-group files
-                if any(file_path.suffix.lower() in exclude_files for exclude in exclude_files):
-                    logger.debug(f"Skipping non-group file: {file_path.name}")
-                    continue
-                    
-                try:
-                    self._process_group_file(file_path)
-                except Exception as e:
-                    logger.error(f"Error processing group file {file_path}: {e}")
-    
-    def _process_group_file(self, file_path: Path) -> None:
-        """
-        Process a single group file.
-        
-        Args:
-            file_path: Path to the group file
-        """
-        logger.info(f"Processing group file: {file_path.name}")
-        
-        try:
-            with open(file_path, 'r', encoding=self.config.kerberoast_encoding) as f:
-                # Skip empty lines to find first non-empty line
-                first_line = ""
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        first_line = line
-                        break
-                
-                logger.debug(f"First non-empty line: '{first_line}'")
-                
-                if first_line:
-                    # Use filename (without extension) as group name
-                    group_name = file_path.stem
-                    self.groups.append((group_name, str(file_path)))
-                    logger.info(f"Loaded group '{group_name}' from file: {file_path.name}")
-                else:
-                    logger.warning(f"Skipped empty file: {file_path.name}")
-        except Exception as e:
-            logger.error(f"Error reading group file {file_path}: {e}")
-    
-    def load_group_members(self) -> None:
-        """Load members for each group."""
-        for group_name, file_path in self.groups:
-            try:
-                users = self._load_group_members_from_file(file_path)
-                self.group_users[group_name] = users
-                logger.info(f"Group '{group_name}' has {len(users)} members")
-            except Exception as e:
-                logger.error(f"Error loading members for group '{group_name}': {e}")
-                self.group_users[group_name] = []
-    
-    def _load_group_members_from_file(self, file_path: str) -> List[str]:
-        """
-        Load group members from a file.
-        
-        Args:
-            file_path: Path to the group file
-            
-        Returns:
-            List of usernames
-        """
-        users = []
-        
-        # Try different encodings
-        encodings_to_try = ['utf-16', 'utf-8', self.config.kerberoast_encoding]
-        
-        for encoding in encodings_to_try:
-            try:
-                with open(file_path, 'r', encoding=encoding) as f:
-                    user_domain = ""
-                    user_name = ""
-                    
-                    for line in f:
-                        line = line.strip()
-                        if not line:  # Skip empty lines
-                            continue
 
-                        if "MemberDomain" in line:
-                            user_domain = line.split(":")[1].strip()
-                        elif "MemberName" in line:
-                            user_name = line.split(":")[1].strip()
-                            users.append(f"{user_domain}\\{user_name}")
+        import json
+        for file_path in self.config.bloodhound_files:
+            logger.info(f"Processing BloodHound file: {file_path}")
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
                     
-                    if not users:
-                        # Try simple username list format
-                        f.seek(0)
-                        for line in f:
-                            username = line.strip()
-                            if username and not username.startswith('\x00'):  # Skip null bytes
-                                users.append(username)
-                    
-                    # If we got valid users, break out of encoding loop
-                    if users and not any('\x00' in user for user in users[:3]):
-                        break
-                    else:
-                        users = []  # Reset if we got invalid data
-                        
+                meta_type = data.get("meta", {}).get("type", "")
+                
+                if meta_type == "users":
+                    self._process_users(data.get("data", []))
+                elif meta_type == "groups":
+                    self._process_groups(data.get("data", []))
+                else:
+                    # In case meta type is missing, try to infer or just process both
+                    self._process_users(data.get("data", []))
+                    self._process_groups(data.get("data", []))
             except Exception as e:
-                logger.debug(f"Failed to read {file_path} with encoding {encoding}: {e}")
-                users = []  # Reset on error
+                logger.error(f"Error processing BloodHound file {file_path}: {e}")
+
+        self._resolve_groups()
+
+    def _process_users(self, users_data: list) -> None:
+        """Extract kerberoastable and asreproastable users, and map SIDs."""
+        for user in users_data:
+            props = user.get("Properties", {})
+
+            # If enabled flag is specified, skip accounts that are not enabled
+            if self.config.enabled_only and props.get("enabled") is False:
                 continue
 
-        if not users:
-            logger.error(f"Could not read group file {file_path} with any encoding")
-            
-        return users
+            sid = user.get("ObjectIdentifier")
 
+            raw_name = props.get("name", "")
+            domain = props.get("domain", "")
+
+            if "@" in raw_name:
+                short_name = raw_name.split("@")[0]
+            else:
+                short_name = raw_name
+
+            if domain and short_name:
+                netbios_domain = domain.split('.')[0].upper()
+                formatted_name = f"{netbios_domain}\\{short_name}"
+            else:
+                formatted_name = short_name
+
+            if sid:
+                self._sid_to_name[sid] = formatted_name
+
+            if props.get("hasspn") is True:
+                self.kerberoastable_users.append(formatted_name)
+
+            if props.get("dontreqpreauth") is True:
+                self.asreproastable_users.append(formatted_name)
+
+    def _process_groups(self, groups_data: list) -> None:
+        """Map group SIDs and their members."""
+        for group in groups_data:
+            props = group.get("Properties", {})
+            sid = group.get("ObjectIdentifier")
+            raw_name = props.get("name", "")
+            
+            if sid:
+                self._sid_to_name[sid] = raw_name
+
+            members = group.get("Members", [])
+            member_sids = [m.get("ObjectIdentifier") for m in members if m.get("ObjectIdentifier")]
+
+            if sid:
+                self._sid_to_members[sid] = member_sids
+
+    def _resolve_groups(self) -> None:
+        """Resolve members for specific groups we want to track."""
+        target_sids = {}
+        for sid, name in self._sid_to_name.items():
+            short_name = name.split("@")[0].upper()
+            if short_name in self._group_names_to_track:
+                display_name = short_name.title()
+                target_sids[display_name] = sid
+
+        for display_name, sid in target_sids.items():
+            self.groups.append((display_name, sid))
+            resolved_members = self._get_all_members(sid, set())
+
+            user_names = []
+            for member_sid in resolved_members:
+                name = self._sid_to_name.get(member_sid)
+                if name and "@" not in name:
+                    user_names.append(name)
+
+            self.group_users[display_name] = user_names
+            logger.info(f"Group '{display_name}' has {len(user_names)} members")
+
+    def _get_all_members(self, sid: str, visited: set) -> set:
+        """Recursively get all members of a group."""
+        if sid in visited:
+            return set()
+
+        visited.add(sid)
+        members = set()
+
+        for member_sid in self._sid_to_members.get(sid, []):
+            members.add(member_sid)
+            if member_sid in self._sid_to_members:
+                members.update(self._get_all_members(member_sid, visited))
+
+        return members
 
 class CrackedPasswordProcessor:
     """Handles processing of cracked password files."""
@@ -1225,8 +1218,8 @@ def parse_arguments() -> Config:
         epilog="""
 Examples:
   %(prog)s -n customer.ntds -c hashcat.potfile -p 8
-  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -g groups/ -s
-  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -kz kerberoast.txt
+  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -b users.json groups.json -s
+  %(prog)s -n customer.ntds -c hashcat.potfile -p 8 -b users.json -e
         """
     )
     
@@ -1238,8 +1231,10 @@ Examples:
                        help='HTML report output filename (default: %(default)s)')
     parser.add_argument('-d', '--reportdirectory', default='DPAT Report',
                        help='Output directory for HTML reports (default: %(default)s)')
-    parser.add_argument('-g', '--groupsdirectory',
-                       help='Directory containing group membership files')
+    parser.add_argument('-b', '--bloodhound', nargs='+',
+                       help='One or more BloodHound JSON files (users and/or groups)')
+    parser.add_argument('-e', '--enabled', action='store_true',
+                       help='Only include enabled accounts from BloodHound data')
     parser.add_argument('-p', '--minpasslen', type=int, required=True,
                        help='Minimum password length defined in domain policy')
     parser.add_argument('-s', '--sanitize', action='store_true',
@@ -1248,10 +1243,6 @@ Examples:
                        help='Include machine accounts in analysis')
     parser.add_argument('-k', '--krbtgt', action='store_true',
                        help='Include krbtgt account in analysis')
-    parser.add_argument('-kz', '--kerbfile',
-                       help='File containing Kerberoastable accounts')
-    parser.add_argument('--ch-encoding', default='cp1252',
-                       help='Encoding for Kerberoast files (default: %(default)s)')
     parser.add_argument('-w', '--writedb', action='store_true',
                        help='Write SQLite database to disk for inspection')
     parser.add_argument('-dbg', '--debug', action='store_true',
@@ -1266,14 +1257,13 @@ Examples:
         cracked_file=args.crackfile,
         output_file=args.outputfile,
         report_directory=args.reportdirectory,
-        groups_directory=args.groupsdirectory,
+        bloodhound_files=args.bloodhound,
+        enabled_only=args.enabled,
         min_password_length=args.minpasslen,
         sanitize_output=args.sanitize,
         include_machine_accounts=args.machineaccts,
         include_krbtgt=args.krbtgt,
-        kerberoast_file=args.kerbfile,
-        kerberoast_encoding=args.ch_encoding,
-        write_database=args.writedb,
+                        write_database=args.writedb,
         debug_mode=args.debug,
         no_prompt=args.no_prompt
     )
@@ -1324,24 +1314,23 @@ def main():
         
         # Initialize components
         db_manager = DatabaseManager(config)
-        group_manager = GroupManager(config)
+        bloodhound_manager = BloodHoundManager(config)
         ntds_processor = NTDSProcessor(config, db_manager)
         cracked_processor = CrackedPasswordProcessor(config, db_manager)
         sanitizer = DataSanitizer()
         
         # Load groups
-        group_manager.load_groups()
-        group_manager.load_group_members()
+        bloodhound_manager.load_data()
         
         # Create database schema
-        group_names = [group[0] for group in group_manager.groups]
+        group_names = [group[0] for group in bloodhound_manager.groups]
         db_manager.create_schema(group_names)
         
         # Process NTDS file
         ntds_processor.process_ntds_file()
         
         # Update group membership
-        ntds_processor.update_group_membership(group_manager)
+        ntds_processor.update_group_membership(bloodhound_manager)
         
         # Process cracked passwords
         cracked_processor.process_cracked_file()
@@ -1363,8 +1352,8 @@ def main():
         cracked_processor.perform_lm_cracking()
         
         # Create groups summary entry if groups were processed
-        if config.groups_directory and group_manager.groups:
-            groups_summary_entry = (len(group_manager.groups), None, "Group Cracking Statistics", "groups_stats.html")
+        if config.bloodhound_files and bloodhound_manager.groups:
+            groups_summary_entry = (len(bloodhound_manager.groups), None, "Group Cracking Statistics", "groups_stats.html")
         
         # Generate comprehensive reports
         logger.info("Generating comprehensive reports...")
@@ -1427,50 +1416,77 @@ def main():
                             "Unique Passwords Discovered Through Cracking", None))
         
         # Kerberoastable Accounts
-        if config.kerberoast_file:
-            logger.info(f"Processing Kerberoastable file: {config.kerberoast_file}")
-            kerb_rows = NTDSProcessor.load_kerberoast_ntds(config.kerberoast_file, config.kerberoast_encoding, config.debug_mode)
+        if bloodhound_manager.kerberoastable_users:
+            kerb_usernames = tuple(bloodhound_manager.kerberoastable_users)
+            total_kerb_accts = len(kerb_usernames)
+            placeholders = ",".join("?" * total_kerb_accts)
+
+            db_manager.cursor.execute(f'''
+                SELECT username_full, nt_hash, password
+                FROM   hash_infos
+                WHERE  username_full IN ({placeholders})
+                  AND  password IS NOT NULL
+                  AND  history_index = -1
+            ''', kerb_usernames)
+            cracked_kerb_rows = db_manager.cursor.fetchall()
             
-            if kerb_rows:
-                # Extract unique usernames from kerberoast entries
-                kerb_usernames = tuple({u for u, _ in kerb_rows})  # de-dupe set → tuple
-                total_kerb_accts = len(kerb_usernames)
-                placeholders = ",".join("?" * total_kerb_accts)
+            if cracked_kerb_rows:
+                sanitized_kerb_rows = [sanitizer.sanitize_table_row(row, [2], [1], config.sanitize_output)
+                                     for row in cracked_kerb_rows]
                 
-                db_manager.cursor.execute(f'''
-                    SELECT username_full, nt_hash, password
-                    FROM   hash_infos
-                    WHERE  username_full IN ({placeholders})
-                      AND  password IS NOT NULL
-                      AND  history_index = -1
-                ''', kerb_usernames)
-                cracked_kerb_rows = db_manager.cursor.fetchall()
+                kerb_builder = HTMLReportBuilder(config.report_directory, config.output_file)
+                kerb_builder.add_table(sanitized_kerb_rows,
+                                     ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
+                kerb_filename = kerb_builder.write_report("kerberoast_cracked.html")
                 
-                if cracked_kerb_rows:
-                    # Sanitize passwords and hashes in the data
-                    sanitized_kerb_rows = [sanitizer.sanitize_table_row(row, [2], [1], config.sanitize_output) 
-                                         for row in cracked_kerb_rows]  # password at index 2, nt_hash at index 1
-                    
-                    kerb_builder = HTMLReportBuilder(config.report_directory, config.output_file)
-                    kerb_builder.add_table(sanitized_kerb_rows, 
-                                         ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
-                    kerb_filename = kerb_builder.write_report("kerberoast_cracked.html")
-                    
-                    # Calculate percentage of roastable accounts that are cracked
-                    kerb_percent = calculate_percentage(len(cracked_kerb_rows), total_hashes)
-                    
-                    summary_table.append((
-                        len(cracked_kerb_rows), kerb_percent,
-                        "Cracked Kerberoastable Accounts",
-                        f'<a href="{kerb_filename}">Details</a>'
-                    ))
-                    logger.info(f"Kerberoast cracked report written: {kerb_filename} "
-                              f"({len(cracked_kerb_rows)} / {total_hashes} = {kerb_percent}% cracked)")
-                else:
-                    logger.info("No Kerberoastable accounts were cracked.")
+                kerb_percent = calculate_percentage(len(cracked_kerb_rows), total_hashes)
+
+                summary_table.append((
+                    len(cracked_kerb_rows), kerb_percent,
+                    "Cracked Kerberoastable Accounts",
+                    f'<a href="{kerb_filename}">Details</a>'
+                ))
+                logger.info(f"Kerberoast cracked report written: {kerb_filename} "
+                          f"({len(cracked_kerb_rows)} / {total_hashes} = {kerb_percent}% cracked)")
             else:
-                logger.warning("Kerberoastable file contained no valid NTDS lines.")
-        
+                logger.info("No Kerberoastable accounts were cracked.")
+
+        # ASREPRoastable Accounts
+        if bloodhound_manager.asreproastable_users:
+            asrep_usernames = tuple(bloodhound_manager.asreproastable_users)
+            total_asrep_accts = len(asrep_usernames)
+            placeholders = ",".join("?" * total_asrep_accts)
+
+            db_manager.cursor.execute(f'''
+                SELECT username_full, nt_hash, password
+                FROM   hash_infos
+                WHERE  username_full IN ({placeholders})
+                  AND  password IS NOT NULL
+                  AND  history_index = -1
+            ''', asrep_usernames)
+            cracked_asrep_rows = db_manager.cursor.fetchall()
+
+            if cracked_asrep_rows:
+                sanitized_asrep_rows = [sanitizer.sanitize_table_row(row, [2], [1], config.sanitize_output)
+                                     for row in cracked_asrep_rows]
+
+                asrep_builder = HTMLReportBuilder(config.report_directory, config.output_file)
+                asrep_builder.add_table(sanitized_asrep_rows,
+                                     ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
+                asrep_filename = asrep_builder.write_report("asreproast_cracked.html")
+
+                asrep_percent = calculate_percentage(len(cracked_asrep_rows), total_hashes)
+
+                summary_table.append((
+                    len(cracked_asrep_rows), asrep_percent,
+                    "Cracked ASREPRoastable Accounts",
+                    f'<a href="{asrep_filename}">Details</a>'
+                ))
+                logger.info(f"ASREPRoast cracked report written: {asrep_filename} "
+                          f"({len(cracked_asrep_rows)} / {total_hashes} = {asrep_percent}% cracked)")
+            else:
+                logger.info("No ASREPRoastable accounts were cracked.")
+
         # Insert groups summary entry if groups were processed
         if groups_summary_entry is not None:
             # Create proper HTML link for groups summary entry
@@ -1906,12 +1922,12 @@ def main():
         summary_builder.write_report(config.output_file)
         
         # Generate group reports if groups are specified
-        if group_manager.groups:
+        if bloodhound_manager.groups:
             logger.info("Generating group reports...")
             group_summary_rows = []
             group_page_headers = ["Group Name", "Total Members", "Cracked Members", "Cracked %", "Members Details", "Cracked Details"]
             
-            for group_name, _ in group_manager.groups:
+            for group_name, _ in bloodhound_manager.groups:
                 # Get group member count
                 db_manager.cursor.execute(f'SELECT count(*) FROM hash_infos WHERE "{group_name}" = 1 AND history_index = -1')
                 num_groupmembers = db_manager.cursor.fetchone()[0]
