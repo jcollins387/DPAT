@@ -1447,7 +1447,7 @@ def main():
                                      ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
                 kerb_filename = kerb_builder.write_report("kerberoast_cracked.html")
                 
-                kerb_percent = calculate_percentage(len(cracked_kerb_rows), total_hashes)
+                kerb_percent = calculate_percentage(len(cracked_kerb_rows), total_kerb_accts)
 
                 summary_table.append((
                     len(cracked_kerb_rows), kerb_percent,
@@ -1455,7 +1455,7 @@ def main():
                     f'<a href="{kerb_filename}">Details</a>'
                 ))
                 logger.info(f"Kerberoast cracked report written: {kerb_filename} "
-                          f"({len(cracked_kerb_rows)} / {total_hashes} = {kerb_percent}% cracked)")
+                          f"({len(cracked_kerb_rows)} / {total_kerb_accts} = {kerb_percent}% cracked)")
             else:
                 logger.info("No Kerberoastable accounts were cracked.")
 
@@ -1484,7 +1484,7 @@ def main():
                                      ["Username", "NT Hash", "Password"], cols_to_not_escape=2)
                 asrep_filename = asrep_builder.write_report("asreproast_cracked.html")
 
-                asrep_percent = calculate_percentage(len(cracked_asrep_rows), total_hashes)
+                asrep_percent = calculate_percentage(len(cracked_asrep_rows), total_asrep_accts)
 
                 summary_table.append((
                     len(cracked_asrep_rows), asrep_percent,
@@ -1492,7 +1492,7 @@ def main():
                     f'<a href="{asrep_filename}">Details</a>'
                 ))
                 logger.info(f"ASREPRoast cracked report written: {asrep_filename} "
-                          f"({len(cracked_asrep_rows)} / {total_hashes} = {asrep_percent}% cracked)")
+                          f"({len(cracked_asrep_rows)} / {total_asrep_accts} = {asrep_percent}% cracked)")
             else:
                 logger.info("No ASREPRoastable accounts were cracked.")
 
